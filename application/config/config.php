@@ -125,6 +125,7 @@ $languages = [
     'sv' => 'swedish',
     'th' => 'thai',
     'tr' => 'turkish',
+    'vi' => 'vietnamese',
     'zh-cn' => 'chinese',
     'zh-tw' => 'traditional-chinese',
     'uk' => 'ukrainian',
@@ -212,6 +213,7 @@ $config['available_languages'] = [
     'turkish',
     'ukrainian',
     'uzbek',
+    'vietnamese',
 ];
 
 /*
