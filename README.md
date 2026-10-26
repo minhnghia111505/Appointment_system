@@ -26,6 +26,7 @@
   <a href="#features">Features</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#installation">Installation</a> •
+  <a href="HuongDanChay.md"><strong>📖 Hướng Dẫn Cài Đặt (Tiếng Việt)</strong></a> •
   <a href="#license">License</a>
 </p>
 
