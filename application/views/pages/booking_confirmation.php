@@ -43,7 +43,7 @@
         <?php endif; ?>
 
         <div class="d-flex flex-column flex-sm-row gap-2 justify-content-center mt-4">
-            <a href="<?= site_url() ?>" class="btn btn-primary px-4 py-2">
+            <a href="<?= base_url() ?>" class="btn btn-primary px-4 py-2">
                 <i class="fas fa-calendar-alt me-2"></i>
                 <?= lang('go_to_booking_page') ?>
             </a>

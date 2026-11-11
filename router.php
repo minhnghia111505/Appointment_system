@@ -5,11 +5,10 @@ $uri = rawurldecode($uri);
 
 // Chuyển đường dẫn phù hợp với file system trên Windows
 $filePath = __DIR__ . str_replace('/', DIRECTORY_SEPARATOR, $uri);
+$ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
 
-// Kiểm tra nếu là file tĩnh (CSS, JS, Image, Font...) thực sự tồn tại
-if ($uri !== '/' && file_exists($filePath) && !is_dir($filePath)) {
-    $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-    
+// Kiểm tra nếu là file tĩnh (CSS, JS, Image, Font...) thực sự tồn tại (không đọc file .php)
+if ($uri !== '/' && $ext !== 'php' && file_exists($filePath) && !is_dir($filePath)) {
     $mimeTypes = [
         'css'   => 'text/css',
         'js'    => 'application/javascript',
@@ -22,6 +21,10 @@ if ($uri !== '/' && file_exists($filePath) && !is_dir($filePath)) {
         'woff2' => 'font/woff2',
         'ttf'   => 'font/ttf',
         'eot'   => 'application/vnd.ms-fontobject',
+        'ico'   => 'image/x-icon',
+        'map'   => 'application/json',
+        'json'  => 'application/json',
+        'webp'  => 'image/webp',
     ];
 
     if (isset($mimeTypes[$ext])) {

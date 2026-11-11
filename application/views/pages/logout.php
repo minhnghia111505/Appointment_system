@@ -10,7 +10,7 @@
 </div>
 
 <div class="d-grid gap-2 mb-3">
-    <a href="<?= site_url() ?>" class="btn btn-primary">
+    <a href="<?= base_url() ?>" class="btn btn-primary">
         <i class="fas fa-calendar-alt me-2"></i>
         <?= lang('book_appointment_title') ?>
     </a>
