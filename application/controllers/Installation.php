@@ -29,8 +29,6 @@ class Installation extends EA_Controller
 
         $this->load->model('admins_model');
         $this->load->model('settings_model');
-        $this->load->model('services_model');
-        $this->load->model('providers_model');
         $this->load->model('customers_model');
 
         $this->load->library('instance');
@@ -159,37 +157,6 @@ class Installation extends EA_Controller
                 'company_name' => $company['company_name'],
                 'company_email' => $company['company_email'],
                 'company_link' => $company['company_link'],
-            ]);
-
-            // Service
-            $service_id = $this->services_model->save([
-                'name' => 'Service',
-                'duration' => '30',
-                'price' => '0',
-                'currency' => '',
-                'slot_interval' => 15,
-                'attendants_number' => '1',
-            ]);
-
-            // Provider
-            $this->providers_model->save([
-                'first_name' => 'Jane',
-                'last_name' => 'Doe',
-                'email' => 'jane@example.org',
-                'phone_number' => '+1 (000) 000-0000',
-                'services' => [$service_id],
-                'language' => $admin['language'],
-                'timezone' => $admin['timezone'],
-                'settings' => [
-                    'username' => 'janedoe',
-                    'password' => random_string(),
-                    'working_plan' => setting('company_working_plan'),
-                    'notifications' => true,
-                    'google_sync' => false,
-                    'sync_past_days' => 30,
-                    'sync_future_days' => 90,
-                    'calendar_view' => CALENDAR_VIEW_DEFAULT,
-                ],
             ]);
 
             // Customer

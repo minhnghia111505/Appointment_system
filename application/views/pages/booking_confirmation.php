@@ -18,6 +18,30 @@
             <?= lang('check_spam_folder') ?>
         </p>
 
+        <?php if (!empty(vars('group_booking'))): ?>
+        <div class="text-start border rounded p-3 mb-4">
+            <h4 class="fs-5">Chi tiết đặt lịch nhóm</h4>
+            <p class="mb-3">
+                <?= e(vars('group_booking')['booking_date']) ?>
+                · <?= e(substr(vars('group_booking')['start_time'], 0, 5)) ?>
+                (<?= e(vars('group_booking')['timezone']) ?>)
+                · <?= number_format((float) vars('group_booking')['total_amount'], 0, ',', '.') ?> ₫
+            </p>
+            <?php foreach (vars('group_appointments') as $group_appointment): ?>
+            <div class="border-top py-2">
+                <strong>Khách <?= (int) $group_appointment['guest_index'] ?>:
+                    <?= e($group_appointment['guest_name'] ?: 'Khách') ?></strong>
+                <div><?= e(implode(' + ', array_column($group_appointment['services'], 'name'))) ?></div>
+                <div class="text-muted small">
+                    <?= e($group_appointment['provider_name']) ?>
+                    · <?= (int) $group_appointment['duration'] ?> phút
+                    · <?= number_format((float) $group_appointment['price'], 0, ',', '.') ?> ₫
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
         <div class="d-flex flex-column flex-sm-row gap-2 justify-content-center mt-4">
             <a href="<?= site_url() ?>" class="btn btn-primary px-4 py-2">
                 <i class="fas fa-calendar-alt me-2"></i>

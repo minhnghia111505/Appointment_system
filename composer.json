@@ -77,7 +77,8 @@
     },
     "extra": {
         "google/apiclient-services": [
-            "Calendar"
+            "Calendar",
+            "Oauth2"
         ]
     },
     "autoload": {},

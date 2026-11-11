@@ -56,6 +56,9 @@ class Booking extends EA_Controller
         'id_users_provider',
         'id_users_customer',
         'id_services',
+        'id_group_bookings',
+        'guest_index',
+        'guest_name',
     ];
 
     /**
@@ -229,6 +232,18 @@ class Booking extends EA_Controller
             }
 
             $appointment = $results[0];
+            $appointment['selected_service_ids'] = array_column(
+                $this->appointments_model->get_service_items((int) $appointment['id']),
+                'id_services',
+            );
+            $appointment['selected_service_ids'] = array_values(
+                array_filter($appointment['selected_service_ids'], static fn($id): bool => !empty($id)),
+            );
+
+            if (!$appointment['selected_service_ids']) {
+                $appointment['selected_service_ids'] = [(int) $appointment['id_services']];
+            }
+
             $provider = $this->providers_model->find($appointment['id_users_provider']);
 
             // Make sure the appointment can still be rescheduled.
@@ -417,8 +432,21 @@ class Booking extends EA_Controller
             // Sanitize customer fields - only allow expected fields
             $customer = array_intersect_key($customer, array_flip($this->allowed_customer_fields));
 
+            // Validate and resolve selected services on the server rather than trusting client totals.
+            $service_ids = $this->normalize_service_ids(
+                $appointment['id_services'] ?? null,
+                $appointment['selected_service_ids'] ?? null,
+            );
+            $service_bundle = $this->get_service_bundle((int) $appointment['id_services'], $service_ids);
+
             // Sanitize appointment fields - only allow expected fields
             $appointment = array_intersect_key($appointment, array_flip($this->allowed_appointment_fields));
+            $appointment['selected_service_ids'] = $service_ids;
+
+            $appointment_start = new DateTime($appointment['start_datetime']);
+            $appointment_end = clone $appointment_start;
+            $appointment_end->add(new DateInterval('PT' . $service_bundle['service']['duration'] . 'M'));
+            $appointment['end_datetime'] = $appointment_end->format('Y-m-d H:i:s');
 
             // Security: Remove appointment ID if not in manage mode to prevent IDOR attacks
             if (!$manage_mode && isset($appointment['id'])) {
@@ -454,7 +482,8 @@ class Booking extends EA_Controller
 
             $provider = $this->providers_model->find($appointment['id_users_provider']);
 
-            $service = $this->services_model->find($appointment['id_services']);
+            $service = $service_bundle['service'];
+            $service['name'] = implode(' + ', array_column($service_bundle['items'], 'name'));
 
             $require_captcha = (bool) setting('require_captcha');
 
@@ -560,11 +589,31 @@ class Booking extends EA_Controller
             $appointment_status_options_json = setting('appointment_status_options', '[]');
             $appointment_status_options = json_decode($appointment_status_options_json, true) ?? [];
             $appointment['status'] = $appointment_status_options[0] ?? null;
-            $appointment['end_datetime'] = $this->appointments_model->calculate_end_datetime($appointment);
-
+            unset($appointment['selected_service_ids']);
             $this->appointments_model->only($appointment, $this->allowed_appointment_fields);
 
-            $appointment_id = $this->appointments_model->save($appointment);
+            $this->db->trans_begin();
+
+            try {
+                $this->lock_provider_records([(int) $appointment['id_users_provider']]);
+
+                if ($this->check_datetime_availability($appointment) !== (int) $appointment['id_users_provider']) {
+                    throw new RuntimeException(lang('requested_hour_is_unavailable'));
+                }
+
+                $appointment_id = $this->appointments_model->save($appointment);
+                $this->appointments_model->set_service_items($appointment_id, $service_bundle['items']);
+
+                if (!$this->db->trans_status()) {
+                    throw new RuntimeException('Could not save appointment service selections.');
+                }
+
+                $this->db->trans_commit();
+            } catch (Throwable $e) {
+                $this->db->trans_rollback();
+                throw $e;
+            }
+
             $appointment = $this->appointments_model->find($appointment_id);
 
             $company_color = setting('company_color');
@@ -604,6 +653,596 @@ class Booking extends EA_Controller
     }
 
     /**
+     * Return common slots that can serve every guest with a distinct provider.
+     */
+    public function check_group_availability(): void
+    {
+        try {
+            method('post');
+            allow_iframe_embedding();
+
+            if (setting('disable_booking')) {
+                abort(403);
+            }
+
+            check('guests', 'array');
+            check('selected_date', 'date');
+            check('timezone', 'string');
+
+            $guests = request('guests');
+
+            if (count($guests) < 2 || count($guests) > 3) {
+                throw new InvalidArgumentException('Group bookings must contain two or three guests.');
+            }
+
+            $guest_bundles = $this->prepare_group_guests($guests);
+            $timezone = $this->validate_timezone(request('timezone'));
+            $slot_provider_hours = $this->get_group_provider_hours(
+                $guest_bundles,
+                request('selected_date'),
+                $timezone,
+            );
+            $available_hours = [];
+
+            foreach ($slot_provider_hours as $guest_hours) {
+                foreach (array_keys($guest_hours) as $hour) {
+                    $available_hours[$hour] = true;
+                }
+            }
+
+            $matching_hours = [];
+
+            foreach (array_keys($available_hours) as $hour) {
+                if ($this->match_group_providers($slot_provider_hours, $hour) !== null) {
+                    $matching_hours[] = $hour;
+                }
+            }
+
+            sort($matching_hours);
+            json_response($matching_hours);
+        } catch (Throwable $e) {
+            json_exception($e);
+        }
+    }
+
+    /**
+     * Save all guest appointments atomically as one group booking.
+     */
+    public function register_group(): void
+    {
+        try {
+            method('post');
+            allow_iframe_embedding();
+
+            if (setting('disable_booking')) {
+                abort(403);
+            }
+
+            check('post_data', 'array');
+            check('captcha', 'string|null');
+
+            $post_data = request('post_data');
+            $group = $post_data['group_booking'] ?? null;
+            $customer = $post_data['customer'] ?? null;
+
+            if (!is_array($group) || !is_array($customer)) {
+                throw new InvalidArgumentException('Invalid group booking data.');
+            }
+
+            $guests = $group['guests'] ?? null;
+
+            if (!is_array($guests) || count($guests) < 2 || count($guests) > 3) {
+                throw new InvalidArgumentException('Group bookings must contain two or three guests.');
+            }
+
+            if (!empty($customer['email']) && !filter_var($customer['email'], FILTER_VALIDATE_EMAIL)) {
+                throw new InvalidArgumentException('Invalid email address format.');
+            }
+
+            $customer = array_intersect_key($customer, array_flip($this->allowed_customer_fields));
+            $customer += ['address' => '', 'city' => '', 'zip_code' => '', 'phone_number' => '', 'notes' => ''];
+            $guest_bundles = $this->prepare_group_guests($guests);
+            $start_datetime = $this->validate_group_start_datetime(
+                (string) ($group['booking_date'] ?? ''),
+                (string) ($group['start_time'] ?? ''),
+                (string) ($group['timezone'] ?? ''),
+            );
+            $booking_date = $start_datetime->format('Y-m-d');
+            $start_time = $start_datetime->format('H:i:s');
+            $group_notes = trim(strip_tags((string) ($group['notes'] ?? '')));
+
+            if (setting('require_captcha')) {
+                if (setting('altcha_enabled') === '1') {
+                    check('altcha_payload', 'string|null');
+                    $this->load->library('altcha_client');
+
+                    if (!$this->altcha_client->verify(request('altcha_payload'))) {
+                        json_response(['altcha_verification' => false]);
+                        return;
+                    }
+                } else {
+                    $captcha_phrase = session('captcha_phrase');
+                    $this->session->unset_userdata('captcha_phrase');
+
+                    if (empty($captcha_phrase) || strtoupper((string) request('captcha')) !== strtoupper($captcha_phrase)) {
+                        json_response(['captcha_verification' => false]);
+                        return;
+                    }
+                }
+            }
+
+            $this->db->trans_begin();
+
+            try {
+                $provider_ids = [];
+                foreach ($guest_bundles as $guest_bundle) {
+                    foreach (array_keys($guest_bundle['providers']) as $provider_id) {
+                        $provider_ids[] = (int) $provider_id;
+                    }
+                }
+                $this->lock_provider_records($provider_ids);
+
+                $provider_hours = $this->get_group_provider_hours(
+                    $guest_bundles,
+                    $booking_date,
+                    $start_datetime->getTimezone()->getName(),
+                );
+                $assignment = $this->match_group_providers($provider_hours, $start_datetime->format('H:i'));
+
+                if ($assignment === null) {
+                    throw new RuntimeException(lang('requested_hour_is_unavailable'));
+                }
+
+                foreach ($guest_bundles as $index => &$guest_bundle) {
+                    $guest_bundle['provider_id'] = $assignment[$index];
+                }
+                unset($guest_bundle);
+
+                if ($this->customers_model->exists($customer)) {
+                    $customer['id'] = $this->customers_model->find_record_id($customer);
+                }
+
+                if (!empty($customer['id'])) {
+                    $latest_guest_end = clone $start_datetime;
+
+                    foreach ($guest_bundles as $guest_bundle) {
+                        $guest_end = (clone $start_datetime)->add(
+                            new DateInterval('PT' . $guest_bundle['service']['duration'] . 'M'),
+                        );
+
+                        if ($guest_end > $latest_guest_end) {
+                            $latest_guest_end = $guest_end;
+                        }
+                    }
+
+                    $conflicting_appointments = $this->appointments_model->get([
+                        'id_users_customer' => $customer['id'],
+                        'start_datetime <' => $latest_guest_end->format('Y-m-d H:i:s'),
+                        'end_datetime >' => $start_datetime->format('Y-m-d H:i:s'),
+                    ]);
+
+                    if ($conflicting_appointments) {
+                        throw new RuntimeException(lang('customer_is_already_booked'));
+                    }
+                }
+
+                $customer['language'] = session('language') ?? config('language');
+                $this->customers_model->only($customer, $this->allowed_customer_fields);
+                $customer_id = $this->customers_model->save($customer);
+                $customer = $this->customers_model->find($customer_id);
+
+                $consent = [
+                    'first_name' => $customer['first_name'] ?? '-',
+                    'last_name' => $customer['last_name'] ?? '-',
+                    'email' => $customer['email'] ?? '-',
+                    'ip' => $this->input->ip_address(),
+                    'id_users' => $customer_id,
+                ];
+
+                if (setting('display_terms_and_conditions')) {
+                    $consent['type'] = 'terms-and-conditions';
+                    $this->consents_model->save($consent);
+                }
+
+                if (setting('display_privacy_policy')) {
+                    $consent['type'] = 'privacy-policy';
+                    $this->consents_model->save($consent);
+                }
+
+                $total_amount = array_sum(array_map(
+                    static fn(array $guest_bundle): float => (float) $guest_bundle['service']['price'],
+                    $guest_bundles,
+                ));
+
+                $group_booking_id = $this->appointments_model->create_group_booking([
+                    'id_users_customer' => $customer_id,
+                    'booking_date' => $booking_date,
+                    'start_time' => $start_time,
+                    'timezone' => $start_datetime->getTimezone()->getName(),
+                    'total_guests' => count($guest_bundles),
+                    'total_amount' => $total_amount,
+                    'create_datetime' => date('Y-m-d H:i:s'),
+                ]);
+                $status_options = json_decode(setting('appointment_status_options', '[]'), true) ?? [];
+                $appointment_ids = [];
+
+                foreach ($guest_bundles as $index => $guest_bundle) {
+                    $provider = $this->providers_model->find($guest_bundle['provider_id']);
+                    $service = $guest_bundle['service'];
+                    $service['name'] = implode(' + ', array_column($guest_bundle['items'], 'name'));
+                    $start = clone $start_datetime;
+                    $provider_timezone = $provider['timezone'] ?: date_default_timezone_get();
+                    $start->setTimezone(new DateTimeZone($provider_timezone));
+                    $end = (clone $start)->add(new DateInterval('PT' . $service['duration'] . 'M'));
+                    $appointment = [
+                        'start_datetime' => $start->format('Y-m-d H:i:s'),
+                        'end_datetime' => $end->format('Y-m-d H:i:s'),
+                        'notes' => $group_notes,
+                        'is_unavailability' => false,
+                        'id_users_provider' => $guest_bundle['provider_id'],
+                        'id_users_customer' => $customer_id,
+                        'id_services' => $guest_bundle['primary_service_id'],
+                        'id_group_bookings' => $group_booking_id,
+                        'guest_index' => $index + 1,
+                        'guest_name' => $guest_bundle['guest_name'],
+                        'status' => $status_options[0] ?? null,
+                        'color' => $service['color'] ?? null,
+                        'location' => $service['location'] ?? null,
+                    ];
+
+                    $appointment_id = $this->appointments_model->save($appointment);
+                    $this->appointments_model->set_service_items($appointment_id, $guest_bundle['items']);
+                    $appointment_ids[] = $appointment_id;
+                }
+
+                if (!$this->db->trans_status()) {
+                    throw new RuntimeException('Could not save all group booking details.');
+                }
+
+                $this->db->trans_commit();
+            } catch (Throwable $e) {
+                $this->db->trans_rollback();
+                throw $e;
+            }
+
+            $company_color = setting('company_color');
+            $settings = [
+                'company_name' => setting('company_name'),
+                'company_link' => setting('company_link'),
+                'company_email' => setting('company_email'),
+                'company_color' =>
+                    !empty($company_color) && $company_color != DEFAULT_COMPANY_COLOR ? $company_color : null,
+                'date_format' => setting('date_format'),
+                'time_format' => setting('time_format'),
+            ];
+
+            $appointment_hash = null;
+
+            foreach ($appointment_ids as $index => $appointment_id) {
+                $appointment = $this->appointments_model->find($appointment_id);
+                $appointment_hash ??= $appointment['hash'];
+                $provider = $this->providers_model->find($guest_bundles[$index]['provider_id']);
+                $service = $guest_bundles[$index]['service'];
+                $service['name'] = implode(' + ', array_column($guest_bundles[$index]['items'], 'name'));
+
+                $this->synchronization->sync_appointment_saved($appointment, $service, $provider, $customer, $settings);
+                $this->notifications->notify_appointment_saved($appointment, $service, $provider, $customer, $settings, false);
+                $this->webhooks_client->trigger(WEBHOOK_APPOINTMENT_SAVE, $appointment);
+            }
+
+            json_response([
+                'group_booking_id' => $group_booking_id,
+                'appointment_ids' => $appointment_ids,
+                'appointment_hash' => $appointment_hash,
+            ]);
+        } catch (Throwable $e) {
+            json_exception($e);
+        }
+    }
+
+    /**
+     * Normalize and validate group guest choices using server-side service and provider data.
+     */
+    protected function prepare_group_guests(array $guests): array
+    {
+        $prepared_guests = [];
+        $available_providers = $this->providers_model->get_available_providers(true);
+
+        foreach ($guests as $index => $guest) {
+            if (!is_array($guest)) {
+                throw new InvalidArgumentException('A group guest entry is invalid.');
+            }
+
+            $primary_service_id = filter_var($guest['primary_service_id'] ?? null, FILTER_VALIDATE_INT);
+            $service_ids = $this->normalize_service_ids($primary_service_id, $guest['service_ids'] ?? null);
+            $service_bundle = $this->get_service_bundle($primary_service_id, $service_ids);
+            $eligible_providers = [];
+
+            foreach ($available_providers as $provider) {
+                if ($this->provider_supports_services($provider, $service_ids)) {
+                    $eligible_providers[(int) $provider['id']] = $provider;
+                }
+            }
+
+            $requested_provider_id = (string) ($guest['provider_id'] ?? ANY_PROVIDER);
+
+            if ($requested_provider_id !== (string) ANY_PROVIDER) {
+                $requested_provider_id = filter_var($requested_provider_id, FILTER_VALIDATE_INT);
+
+                if (!$requested_provider_id || !isset($eligible_providers[$requested_provider_id])) {
+                    throw new InvalidArgumentException('A selected barber cannot perform all services for this guest.');
+                }
+
+                $eligible_providers = [$requested_provider_id => $eligible_providers[$requested_provider_id]];
+            }
+
+            if (!$eligible_providers) {
+                throw new InvalidArgumentException('No barber is assigned to all selected services for a guest.');
+            }
+
+            $guest_name = trim(strip_tags((string) ($guest['guest_name'] ?? '')));
+
+            if (mb_strlen($guest_name) > 256) {
+                throw new InvalidArgumentException('A guest name is too long.');
+            }
+
+            $prepared_guests[] = [
+                'guest_name' => $guest_name,
+                'primary_service_id' => $primary_service_id,
+                'service_ids' => $service_ids,
+                'service' => $service_bundle['service'],
+                'items' => $service_bundle['items'],
+                'providers' => $eligible_providers,
+            ];
+        }
+
+        return $prepared_guests;
+    }
+
+    /**
+     * Get per-guest provider slots, applying each guest's provider preference.
+     */
+    protected function get_group_provider_hours(array $guests, string $date, string $timezone): array
+    {
+        $guest_hours = [];
+        $booking_timezone = new DateTimeZone($timezone);
+
+        foreach ($guests as $index => $guest) {
+            $guest_hours[$index] = [];
+
+            foreach ($guest['providers'] as $provider_id => $provider) {
+                $provider_timezone = new DateTimeZone($provider['timezone'] ?: date_default_timezone_get());
+                $booking_day = new DateTime($date . ' 12:00:00', $booking_timezone);
+                $provider_day = (clone $booking_day)->setTimezone($provider_timezone);
+
+                for ($day_offset = -1; $day_offset <= 1; $day_offset++) {
+                    $current_provider_day = (clone $provider_day)->modify(($day_offset >= 0 ? '+' : '') . $day_offset . ' days');
+                    $hours = $this->availability->get_available_hours(
+                        $current_provider_day->format('Y-m-d'),
+                        $guest['service'],
+                        $provider,
+                    );
+
+                    foreach ($hours as $hour) {
+                        $provider_start = new DateTime(
+                            $current_provider_day->format('Y-m-d') . ' ' . $hour,
+                            $provider_timezone,
+                        );
+                        $booking_start = (clone $provider_start)->setTimezone($booking_timezone);
+
+                        if ($booking_start->format('Y-m-d') === $date) {
+                            $booking_hour = $booking_start->format('H:i');
+                            $guest_hours[$index][$booking_hour][] = (int) $provider_id;
+                        }
+                    }
+                }
+            }
+        }
+
+        return $guest_hours;
+    }
+
+    /**
+     * Assign a different available provider to each guest at the requested time.
+     */
+    protected function match_group_providers(array $guest_hours, string $hour, int $guest_index = 0, array $used = []): ?array
+    {
+        if ($guest_index >= count($guest_hours)) {
+            return [];
+        }
+
+        foreach ($guest_hours[$guest_index][$hour] ?? [] as $provider_id) {
+            if (in_array($provider_id, $used, true)) {
+                continue;
+            }
+
+            $assignment = $this->match_group_providers(
+                $guest_hours,
+                $hour,
+                $guest_index + 1,
+                [...$used, $provider_id],
+            );
+
+            if ($assignment !== null) {
+                return [$provider_id, ...$assignment];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Lock provider rows so group and single bookings cannot reserve the same provider concurrently.
+     */
+    protected function lock_provider_records(array $provider_ids): void
+    {
+        $provider_ids = array_values(array_unique(array_filter(array_map('intval', $provider_ids))));
+
+        if (!$provider_ids) {
+            throw new RuntimeException('No eligible barbers are available.');
+        }
+
+        sort($provider_ids);
+        $placeholders = implode(', ', array_fill(0, count($provider_ids), '?'));
+
+        $this->db->query(
+            'SELECT id FROM `' . $this->db->dbprefix('users') . '` WHERE id IN (' . $placeholders . ') ORDER BY id FOR UPDATE',
+            $provider_ids,
+        );
+    }
+
+    /**
+     * Validate the common local start date and time submitted by the group booking form.
+     */
+    protected function validate_group_start_datetime(string $date, string $time, string $timezone): DateTime
+    {
+        $timezone = $this->validate_timezone($timezone);
+        $start = DateTime::createFromFormat('!Y-m-d H:i', $date . ' ' . $time, new DateTimeZone($timezone));
+        $errors = DateTime::getLastErrors();
+
+        if (
+            !$start ||
+            ($errors !== false && ($errors['warning_count'] || $errors['error_count'])) ||
+            $start->format('Y-m-d H:i') !== $date . ' ' . $time
+        ) {
+            throw new InvalidArgumentException('The group booking date or start time is invalid.');
+        }
+
+        return $start;
+    }
+
+    /**
+     * Accept only installed IANA timezones.
+     */
+    protected function validate_timezone(string $timezone): string
+    {
+        if (!in_array($timezone, DateTimeZone::listIdentifiers(), true)) {
+            throw new InvalidArgumentException('The group booking timezone is invalid.');
+        }
+
+        return $timezone;
+    }
+
+    /**
+     * Normalize and validate the service IDs submitted for a booking.
+     *
+     * @param int|string|null $primary_service_id Primary service ID.
+     * @param mixed $service_ids Selected service IDs from the request.
+     *
+     * @return int[]
+     */
+    protected function normalize_service_ids(int|string|null $primary_service_id, mixed $service_ids): array
+    {
+        $primary_service_id = filter_var($primary_service_id, FILTER_VALIDATE_INT);
+
+        if (!$primary_service_id || $primary_service_id < 1) {
+            throw new InvalidArgumentException('A valid primary service is required.');
+        }
+
+        if (is_string($service_ids)) {
+            $service_ids = json_decode($service_ids, true);
+
+            if (!is_array($service_ids)) {
+                throw new InvalidArgumentException('The selected services are invalid.');
+            }
+        }
+
+        if ($service_ids === null) {
+            $service_ids = [$primary_service_id];
+        }
+
+        if (!is_array($service_ids) || count($service_ids) > 20) {
+            throw new InvalidArgumentException('The selected services are invalid.');
+        }
+
+        $normalized_ids = [$primary_service_id];
+
+        foreach ($service_ids as $service_id) {
+            $service_id = filter_var($service_id, FILTER_VALIDATE_INT);
+
+            if (!$service_id || $service_id < 1) {
+                throw new InvalidArgumentException('The selected services are invalid.');
+            }
+
+            if (!in_array($service_id, $normalized_ids, true)) {
+                $normalized_ids[] = $service_id;
+            }
+        }
+
+        return $normalized_ids;
+    }
+
+    /**
+     * Load selected services and calculate their combined appointment values.
+     *
+     * @param int $primary_service_id Primary service ID.
+     * @param int[] $service_ids Selected service IDs.
+     *
+     * @return array
+     */
+    protected function get_service_bundle(int $primary_service_id, array $service_ids): array
+    {
+        $items = [];
+        $primary_service = null;
+
+        foreach ($service_ids as $service_id) {
+            $service = $this->services_model->find($service_id);
+
+            if (!empty($service['is_private'])) {
+                throw new InvalidArgumentException('A selected service is not available for public booking.');
+            }
+
+            $category = !empty($service['id_service_categories'])
+                ? $this->db->get_where('service_categories', ['id' => $service['id_service_categories']])->row_array()
+                : null;
+            $is_combo = !empty($category) && stripos((string) ($category['name'] ?? ''), 'combo') !== false;
+
+            if ($is_combo && $service_id !== $primary_service_id) {
+                throw new InvalidArgumentException('A combo can only be selected as the primary service.');
+            }
+
+            $items[] = [
+                'id_services' => (int) $service['id'],
+                'name' => $service['name'],
+                'duration' => (int) $service['duration'],
+                'price' => (float) $service['price'],
+            ];
+
+            if ($service_id === $primary_service_id) {
+                $primary_service = $service;
+            }
+        }
+
+        if ($primary_service === null) {
+            throw new InvalidArgumentException('The primary service must be part of the selection.');
+        }
+
+        $primary_service['duration'] = array_sum(array_column($items, 'duration'));
+        $primary_service['price'] = array_sum(array_column($items, 'price'));
+
+        return [
+            'service' => $primary_service,
+            'service_ids' => $service_ids,
+            'items' => $items,
+        ];
+    }
+
+    /**
+     * Determine whether a provider is assigned to every selected service.
+     *
+     * @param array $provider Provider data.
+     * @param int[] $service_ids Selected service IDs.
+     *
+     * @return bool
+     */
+    protected function provider_supports_services(array $provider, array $service_ids): bool
+    {
+        $provider_service_ids = array_map('intval', $provider['services']);
+
+        return !array_diff($service_ids, $provider_service_ids);
+    }
+
+    /**
      * Check whether the provider is still available in the selected appointment date.
      *
      * It is possible that two or more customers select the same appointment date and time concurrently. The app won't
@@ -626,22 +1265,26 @@ class Booking extends EA_Controller
         $date = $appointment_start->format('Y-m-d');
 
         $hour = $appointment_start->format('H:i');
+        $service_ids = $appointment['selected_service_ids'] ?? [(int) $appointment['id_services']];
+        $service_bundle = $this->get_service_bundle((int) $appointment['id_services'], $service_ids);
 
         if ($appointment['id_users_provider'] === ANY_PROVIDER) {
-            $appointment['id_users_provider'] = $this->search_any_provider($appointment['id_services'], $date, $hour);
+            $appointment['id_users_provider'] = $this->search_any_provider($service_bundle, $date, $hour);
 
             return $appointment['id_users_provider'];
         }
-
-        $service = $this->services_model->find($appointment['id_services']);
 
         $exclude_appointment_id = $appointment['id'] ?? null;
 
         $provider = $this->providers_model->find($appointment['id_users_provider']);
 
+        if (!$this->provider_supports_services($provider, $service_ids)) {
+            return null;
+        }
+
         $available_hours = $this->availability->get_available_hours(
             $date,
-            $service,
+            $service_bundle['service'],
             $provider,
             $exclude_appointment_id,
         );
@@ -661,11 +1304,11 @@ class Booking extends EA_Controller
     }
 
     /**
-     * Search for any provider that can handle the requested service.
+     * Search for any provider that can handle all selected services.
      *
      * This method will return the database ID of the provider with the most available periods.
      *
-     * @param int $service_id Service ID
+     * @param array $service_bundle Selected services and their combined values.
      * @param string $date Selected date (Y-m-d).
      * @param string|null $hour Selected hour (H:i).
      *
@@ -673,31 +1316,31 @@ class Booking extends EA_Controller
      *
      * @throws Exception
      */
-    protected function search_any_provider(int $service_id, string $date, ?string $hour = null): ?int
+    protected function search_any_provider(array $service_bundle, string $date, ?string $hour = null): ?int
     {
         $available_providers = $this->providers_model->get_available_providers(true);
-
-        $service = $this->services_model->find($service_id);
 
         $provider_id = null;
 
         $max_hours_count = 0;
 
         foreach ($available_providers as $provider) {
-            foreach ($provider['services'] as $provider_service_id) {
-                if ($provider_service_id == $service_id) {
-                    // Check if the provider is available for the requested date.
-                    $available_hours = $this->availability->get_available_hours($date, $service, $provider);
+            if (!$this->provider_supports_services($provider, $service_bundle['service_ids'])) {
+                continue;
+            }
 
-                    if (
-                        count($available_hours) > $max_hours_count &&
-                        (empty($hour) || in_array($hour, $available_hours))
-                    ) {
-                        $provider_id = $provider['id'];
+            $available_hours = $this->availability->get_available_hours(
+                $date,
+                $service_bundle['service'],
+                $provider,
+            );
 
-                        $max_hours_count = count($available_hours);
-                    }
-                }
+            if (
+                count($available_hours) > $max_hours_count &&
+                (empty($hour) || in_array($hour, $available_hours))
+            ) {
+                $provider_id = $provider['id'];
+                $max_hours_count = count($available_hours);
             }
         }
 
@@ -725,12 +1368,14 @@ class Booking extends EA_Controller
 
             check('provider_id', 'string|numeric|null');
             check('service_id', 'numeric');
+            check('service_ids', 'string|null');
             check('selected_date', 'date');
             check('manage_mode', 'bool|null');
             check('appointment_id', 'numeric|null');
 
             $provider_id = request('provider_id');
             $service_id = request('service_id');
+            $service_ids = $this->normalize_service_ids($service_id, request('service_ids'));
             $selected_date = request('selected_date');
 
             // Do not continue if there was no provider selected (more likely there is no provider in the system).
@@ -749,7 +1394,7 @@ class Booking extends EA_Controller
             // If the user has selected the "any-provider" option then we will need to search for an available provider
             // that will provide the requested service.
 
-            $service = $this->services_model->find($service_id);
+            $service_bundle = $this->get_service_bundle((int) $service_id, $service_ids);
 
             if ($provider_id === ANY_PROVIDER) {
                 $providers = $this->providers_model->get_available_providers(true);
@@ -757,13 +1402,13 @@ class Booking extends EA_Controller
                 $available_hours = [];
 
                 foreach ($providers as $provider) {
-                    if (!in_array($service_id, $provider['services'])) {
+                    if (!$this->provider_supports_services($provider, $service_ids)) {
                         continue;
                     }
 
                     $provider_available_hours = $this->availability->get_available_hours(
                         $selected_date,
-                        $service,
+                        $service_bundle['service'],
                         $provider,
                         $exclude_appointment_id,
                     );
@@ -779,9 +1424,15 @@ class Booking extends EA_Controller
             } else {
                 $provider = $this->providers_model->find($provider_id);
 
+                if (!$this->provider_supports_services($provider, $service_ids)) {
+                    json_response([]);
+
+                    return;
+                }
+
                 $response = $this->availability->get_available_hours(
                     $selected_date,
-                    $service,
+                    $service_bundle['service'],
                     $provider,
                     $exclude_appointment_id,
                 );
@@ -817,12 +1468,14 @@ class Booking extends EA_Controller
 
             check('provider_id', 'string|numeric|null');
             check('service_id', 'numeric');
+            check('service_ids', 'string|null');
             check('appointment_id', 'numeric|null');
             check('manage_mode', 'bool|null');
             check('selected_date', 'date');
 
             $provider_id = request('provider_id');
             $service_id = request('service_id');
+            $service_ids = $this->normalize_service_ids($service_id, request('service_ids'));
             $appointment_id = request('appointment_id');
             $manage_mode = filter_var(request('manage_mode'), FILTER_VALIDATE_BOOLEAN);
             $selected_date_string = request('selected_date');
@@ -831,12 +1484,12 @@ class Booking extends EA_Controller
             $unavailable_dates = [];
 
             $provider_ids =
-                $provider_id === ANY_PROVIDER ? $this->search_providers_by_service($service_id) : [$provider_id];
+                $provider_id === ANY_PROVIDER ? $this->search_providers_by_service($service_ids) : [$provider_id];
 
             $exclude_appointment_id = $manage_mode ? $appointment_id : null;
 
             // Get the service record.
-            $service = $this->services_model->find($service_id);
+            $service_bundle = $this->get_service_bundle((int) $service_id, $service_ids);
 
             for ($i = 1; $i <= $number_of_days_in_month; $i++) {
                 $current_date = new DateTime($selected_date->format('Y-m') . '-' . $i);
@@ -848,12 +1501,18 @@ class Booking extends EA_Controller
                 }
 
                 // Finding at least one slot of availability.
+                $available_hours = [];
+
                 foreach ($provider_ids as $current_provider_id) {
                     $provider = $this->providers_model->find($current_provider_id);
 
+                    if (!$this->provider_supports_services($provider, $service_ids)) {
+                        continue;
+                    }
+
                     $available_hours = $this->availability->get_available_hours(
                         $current_date->format('Y-m-d'),
-                        $service,
+                        $service_bundle['service'],
                         $provider,
                         $exclude_appointment_id,
                     );
@@ -884,25 +1543,22 @@ class Booking extends EA_Controller
     }
 
     /**
-     * Search for any provider that can handle the requested service.
+     * Search for providers that can handle every selected service.
      *
      * This method will return the database ID of the providers affected to the requested service.
      *
-     * @param int $service_id The requested service ID.
+     * @param int[] $service_ids The requested service IDs.
      *
      * @return array Returns the ID of the provider that can provide the requested service.
      */
-    protected function search_providers_by_service(int $service_id): array
+    protected function search_providers_by_service(array $service_ids): array
     {
         $available_providers = $this->providers_model->get_available_providers(true);
         $provider_list = [];
 
         foreach ($available_providers as $provider) {
-            foreach ($provider['services'] as $provider_service_id) {
-                if ($provider_service_id === $service_id) {
-                    // Check if the provider is affected to the selected service.
-                    $provider_list[] = $provider['id'];
-                }
+            if ($this->provider_supports_services($provider, $service_ids)) {
+                $provider_list[] = $provider['id'];
             }
         }
 

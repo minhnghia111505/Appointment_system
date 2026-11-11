@@ -12,9 +12,28 @@
 
         <div class="row frame-content">
             <div class="col col-lg-8 offset-md-2">
+                <div class="mb-4">
+                    <label for="booking-attendance-mode" class="fs-5 mb-2"><strong>Hình thức đặt lịch</strong></label>
+                    <select id="booking-attendance-mode" class="form-select">
+                        <option value="single">Đặt lịch cá nhân</option>
+                        <option value="group">Đặt lịch nhóm (2-3 khách)</option>
+                    </select>
+                </div>
+
+                <div id="booking-single-config">
+                <div class="mb-3">
+                    <label for="booking-package-mode" class="fs-5 mb-2">
+                        <strong><?= lang('service') ?></strong>
+                    </label>
+                    <select id="booking-package-mode" class="form-select mb-3">
+                        <option value="combo">Chọn combo</option>
+                        <option value="individual">Tự chọn dịch vụ lẻ</option>
+                    </select>
+                </div>
+
                 <div class="mb-3">
                     <label for="select-service" class="fs-5 mb-2">
-                        <strong><?= lang('service') ?></strong>
+                        <strong>Gói chính</strong>
                     </label>
 
                     <select id="select-service" class="form-select mb-4">
@@ -62,6 +81,8 @@
                                     foreach ($group as $service) {
                                         echo '<option value="' .
                                             $service['id'] .
+                                            '" data-category="' .
+                                            e($service['service_category_name'] ?? '') .
                                             '">' .
                                             e($service['name']) .
                                             '</option>';
@@ -71,11 +92,36 @@
                             }
                         } else {
                             foreach ($available_services as $service) {
-                                echo '<option value="' . $service['id'] . '">' . e($service['name']) . '</option>';
+                                echo '<option value="' .
+                                    $service['id'] .
+                                    '" data-category="' .
+                                    e($service['service_category_name'] ?? '') .
+                                    '">' .
+                                    e($service['name']) .
+                                    '</option>';
                             }
                         }
                         ?>
                     </select>
+                </div>
+
+                <div id="booking-addons-section" class="mb-4" hidden>
+                    <h3 class="fs-5 mb-2">Dịch vụ bổ sung</h3>
+                    <p class="text-muted small">Có thể chọn nhiều dịch vụ. Giá và thời gian được cộng vào gói chính.</p>
+                    <div id="booking-addons" class="booking-addons-list"></div>
+                </div>
+
+                <div id="booking-package-summary" class="booking-package-summary mb-4 p-3 rounded border" aria-live="polite" hidden>
+                    <strong>Tạm tính</strong>
+                    <div id="booking-package-summary-items" class="small mt-2"></div>
+                    <div class="d-flex justify-content-between mt-2">
+                        <span>Tổng thời gian</span>
+                        <strong id="booking-package-total-duration">0 phút</strong>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <span>Tổng tiền</span>
+                        <strong id="booking-package-total-price">0 ₫</strong>
+                    </div>
                 </div>
 
                 <div class="mb-3" hidden>
@@ -93,6 +139,19 @@
                 <div id="service-description" class="small overflow-auto shadow-none" style="max-height: 153px;">
                     <!-- JS -->
                 </div>
+                </div>
+
+                <section id="booking-group-config" class="mb-4" hidden>
+                    <div class="mb-3">
+                        <label for="booking-group-size" class="form-label fw-semibold">Số khách trong nhóm</label>
+                        <select id="booking-group-size" class="form-select">
+                            <option value="2">2 khách</option>
+                            <option value="3">3 khách</option>
+                        </select>
+                    </div>
+                    <div id="booking-group-guests" class="booking-group-guests"></div>
+                    <div id="booking-group-summary" class="booking-package-summary mt-3 p-3 rounded border" aria-live="polite"></div>
+                </section>
 
             </div>
         </div>

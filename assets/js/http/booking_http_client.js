@@ -33,6 +33,7 @@ App.Http.Booking = (function () {
     let processingUnavailableDates = false;
     let searchedMonthStart;
     let searchedMonthCounter = 0;
+    let groupHoursRequestSequence = 0;
 
     /**
      * Get Available Hours
@@ -45,19 +46,14 @@ App.Http.Booking = (function () {
     function getAvailableHours(selectedDate) {
         $availableHours.empty();
 
-        // Find the selected service duration (it is going to be send within the "data" object).
-        const serviceId = $selectService.val();
-
-        // Default value of duration (in minutes).
-        let serviceDuration = 15;
-
-        const service = vars('available_services').find(
-            (availableService) => Number(availableService.id) === Number(serviceId),
-        );
-
-        if (service) {
-            serviceDuration = service.duration;
+        if (App.Pages.Booking.isGroupBooking()) {
+            getGroupAvailableHours(selectedDate);
+            return;
         }
+
+        groupHoursRequestSequence++;
+        const serviceId = $selectService.val();
+        const selectedServiceIds = App.Pages.Booking.getSelectedServiceIds();
 
         // If the manage mode is true then the appointment's start date should return as available too.
         const appointmentId = vars('manage_mode') ? vars('appointment_data').id : null;
@@ -68,14 +64,18 @@ App.Http.Booking = (function () {
         const data = {
             csrf_token: vars('csrf_token'),
             service_id: $selectService.val(),
+            service_ids: JSON.stringify(selectedServiceIds),
             provider_id: $selectProvider.val(),
             selected_date: selectedDate,
-            service_duration: serviceDuration,
             manage_mode: Number(vars('manage_mode') || 0),
             appointment_id: appointmentId,
         };
 
         $.post(url, data).done((response) => {
+            if (App.Pages.Booking.isGroupBooking()) {
+                return;
+            }
+
             $availableHours.empty();
 
             // The response contains the available hours for the selected provider and service. Fill the available
@@ -85,7 +85,11 @@ App.Http.Booking = (function () {
 
                 if (providerId === 'any-provider') {
                     for (const availableProvider of vars('available_providers')) {
-                        if (availableProvider.services.indexOf(Number(serviceId)) !== -1) {
+                        if (
+                            selectedServiceIds.every((selectedId) =>
+                                availableProvider.services.map(Number).includes(selectedId),
+                            )
+                        ) {
                             providerId = availableProvider.id; // Use first available provider.
                             break;
                         }
@@ -150,6 +154,62 @@ App.Http.Booking = (function () {
     }
 
     /**
+     * Load times where a distinct available barber can be assigned to every guest.
+     *
+     * @param {String} selectedDate Date to search.
+     */
+    function getGroupAvailableHours(selectedDate) {
+        const requestSequence = ++groupHoursRequestSequence;
+
+        if (!App.Pages.Booking.hasCompleteGroupServices()) {
+            $availableHours.text('Vui lòng chọn dịch vụ chính cho từng khách để tìm giờ trống.');
+            return;
+        }
+
+        const url = App.Utils.Url.siteUrl('booking/check_group_availability');
+        const data = {
+            csrf_token: vars('csrf_token'),
+            selected_date: selectedDate,
+            timezone: $('#select-timezone').val(),
+            guests: App.Pages.Booking.getGroupGuestSelections(),
+        };
+
+        $.post(url, data).done((response) => {
+            if (requestSequence !== groupHoursRequestSequence) {
+                return;
+            }
+
+            $availableHours.empty();
+
+            if (Array.isArray(response) && response.length) {
+                const timeFormat = vars('time_format') === 'regular' ? 'h:mm a' : 'HH:mm';
+                response.forEach((availableHour) => {
+                    const displayTime = moment
+                        .tz(`${selectedDate} ${availableHour}:00`, $('#select-timezone').val())
+                        .format(timeFormat);
+
+                    $availableHours.append(
+                        $('<button/>', {
+                            class: 'btn btn-outline-secondary w-100 shadow-none available-hour',
+                            data: {value: availableHour},
+                            text: displayTime,
+                        }),
+                    );
+                });
+
+                $('.available-hour:eq(0)').addClass('selected-hour');
+                App.Pages.Booking.updateConfirmFrame();
+            } else {
+                $availableHours.text(lang('no_available_hours'));
+            }
+        }).fail(() => {
+            if (requestSequence === groupHoursRequestSequence) {
+                $availableHours.text('Không thể tải giờ trống cho nhóm. Vui lòng thử lại.');
+            }
+        });
+    }
+
+    /**
      * Register an appointment to the database.
      *
      * This method will make an ajax call to the appointments controller that will register
@@ -204,7 +264,8 @@ App.Http.Booking = (function () {
             data.exclude_appointment_id = vars('appointment_data').id;
         }
 
-        const url = App.Utils.Url.siteUrl('booking/register');
+        const endpoint = formData.group_booking ? 'booking/register_group' : 'booking/register';
+        const url = App.Utils.Url.siteUrl(endpoint);
 
         const $layer = $('<div/>');
 
@@ -257,8 +318,12 @@ App.Http.Booking = (function () {
 
                 window.location.href = App.Utils.Url.siteUrl('booking_confirmation/of/' + response.appointment_hash);
             })
-            .fail(() => {
+            .fail((xhr) => {
                 $captchaTitle.find('button').trigger('click');
+
+                if (formData.group_booking) {
+                    $('#form-message').text(xhr.responseJSON?.message || 'Không thể tạo lịch nhóm. Vui lòng thử lại.');
+                }
             })
             .always(() => {
                 $layer.remove();
@@ -293,6 +358,7 @@ App.Http.Booking = (function () {
         const data = {
             provider_id: providerId,
             service_id: serviceId,
+            service_ids: JSON.stringify(App.Pages.Booking.getSelectedServiceIds()),
             selected_date: encodeURIComponent(selectedDateString),
             csrf_token: vars('csrf_token'),
             manage_mode: Number(App.Pages.Booking.manageMode),
@@ -306,6 +372,12 @@ App.Http.Booking = (function () {
             dataType: 'json',
         })
             .done((response) => {
+                if (App.Pages.Booking.isGroupBooking()) {
+                    processingUnavailableDates = false;
+                    $selectDate.parent().fadeTo(400, 1);
+                    return;
+                }
+
                 // In case the current month has no availability, the app will try the next one or the one after in order to
                 // find a date that has at least one slot
 
@@ -355,6 +427,14 @@ App.Http.Booking = (function () {
 
     function applyPreviousUnavailableDates() {
         applyUnavailableDates(unavailableDatesBackup, selectedDateStringBackup);
+    }
+
+    /**
+     * Clear date restrictions inherited from an individual booking selection.
+     */
+    function clearUnavailableDates() {
+        $selectDate[0]._flatpickr.set('disable', []);
+        $selectDate.parent().fadeTo(400, 1);
     }
 
     function applyUnavailableDates(unavailableDates, selectedDateString, setDate) {
@@ -432,8 +512,10 @@ App.Http.Booking = (function () {
     return {
         registerAppointment,
         getAvailableHours,
+        getGroupAvailableHours,
         getUnavailableDates,
         applyPreviousUnavailableDates,
+        clearUnavailableDates,
         deletePersonalInformation,
     };
 })();

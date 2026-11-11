@@ -27,6 +27,8 @@ class Appointments_model extends EA_Model
         'id_users_provider' => 'integer',
         'id_users_customer' => 'integer',
         'id_services' => 'integer',
+        'id_group_bookings' => 'integer',
+        'guest_index' => 'integer',
     ];
 
     /**
@@ -280,6 +282,86 @@ class Appointments_model extends EA_Model
         $this->cast($appointment);
 
         return $appointment;
+    }
+
+    /**
+     * Get the service snapshots stored for an appointment.
+     *
+     * @param int $appointment_id Appointment ID.
+     *
+     * @return array Returns the selected appointment services.
+     */
+    public function get_service_items(int $appointment_id): array
+    {
+        $items = $this->db
+            ->get_where('appointment_services', ['id_appointments' => $appointment_id])
+            ->result_array();
+
+        foreach ($items as &$item) {
+            $item['id_services'] = $item['id_services'] !== null ? (int) $item['id_services'] : null;
+            $item['duration'] = (int) $item['duration'];
+            $item['price'] = (float) $item['price'];
+        }
+
+        return $items;
+    }
+
+    /**
+     * Replace the service snapshots stored for an appointment.
+     *
+     * @param int $appointment_id Appointment ID.
+     * @param array $items Selected service snapshots.
+     */
+    public function set_service_items(int $appointment_id, array $items): void
+    {
+        $this->db->delete('appointment_services', ['id_appointments' => $appointment_id]);
+
+        if (!$items) {
+            return;
+        }
+
+        $rows = [];
+
+        foreach ($items as $item) {
+            $rows[] = [
+                'id_appointments' => $appointment_id,
+                'id_services' => $item['id_services'],
+                'name' => $item['name'],
+                'duration' => $item['duration'],
+                'price' => $item['price'],
+            ];
+        }
+
+        if (!$this->db->insert_batch('appointment_services', $rows)) {
+            throw new RuntimeException('Could not save appointment services.');
+        }
+    }
+
+    /**
+     * Create the parent record shared by a set of group appointment details.
+     *
+     * @param array $group_booking Group customer, schedule, size and amount.
+     *
+     * @return int Group booking database ID.
+     */
+    public function create_group_booking(array $group_booking): int
+    {
+        if (
+            empty($group_booking['id_users_customer']) ||
+            empty($group_booking['booking_date']) ||
+            empty($group_booking['start_time']) ||
+            empty($group_booking['timezone']) ||
+            !in_array((int) ($group_booking['total_guests'] ?? 0), [2, 3], true) ||
+            !isset($group_booking['total_amount'])
+        ) {
+            throw new InvalidArgumentException('The group booking data is incomplete.');
+        }
+
+        if (!$this->db->insert('group_bookings', $group_booking)) {
+            throw new RuntimeException('Could not create the group booking record.');
+        }
+
+        return (int) $this->db->insert_id();
     }
 
     /**

@@ -3,6 +3,15 @@
 This file contains the code changes that were introduced into each release (starting from v1.1.0) so that is easy for
 developers to maintain and readjust their custom modifications on the main project codebase.
 
+## [Unreleased]
+
+### Added
+
+- New installations and database upgrades now include editable Vietnamese barber-shop service categories and services
+- New installations and database upgrades now include seven barber providers with their assigned services
+- Customers can book a combo or main service with add-ons, see the combined price and duration, and choose a barber qualified for every selected service
+- Customers can book two or three guests at a shared start time, with per-guest services and barbers and an all-or-nothing group booking
+
 ## [1.6.1] - 2026-10-12
 
 ### Added

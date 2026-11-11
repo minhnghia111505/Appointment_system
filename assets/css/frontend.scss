@@ -80,3 +80,31 @@
 #book-appointment-wizard .flatpickr-calendar.inline {
     margin: auto;
 }
+
+.booking-addons-list {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.booking-addon-option {
+    padding: 0.75rem;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius);
+}
+
+.booking-addon-option .form-check-input {
+    margin-top: 0.25rem;
+}
+
+.booking-package-summary {
+    background: var(--bs-light);
+}
+
+.booking-group-guest {
+    background: var(--bs-light);
+}
+
+.booking-group-guest-services {
+    max-height: 240px;
+    overflow-y: auto;
+}

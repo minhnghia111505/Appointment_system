@@ -20,6 +20,11 @@ App.Pages.Booking = (function () {
     const $selectDate = $('#select-date');
     const $selectService = $('#select-service');
     const $selectProvider = $('#select-provider');
+    const $bookingPackageMode = $('#booking-package-mode');
+    const $bookingAddons = $('#booking-addons');
+    const $bookingAttendanceMode = $('#booking-attendance-mode');
+    const $bookingGroupSize = $('#booking-group-size');
+    const $bookingGroupGuests = $('#booking-group-guests');
     const $selectTimezone = $('#select-timezone');
     const $firstName = $('#first-name');
     const $lastName = $('#last-name');
@@ -44,6 +49,7 @@ App.Pages.Booking = (function () {
     const moment = window.moment;
 
     const STORAGE_KEY = 'EasyAppointments.CustomerInfo';
+    const COMBO_CATEGORY_PATTERN = /combo/i;
 
     /**
      * Determines the functionality of the page.
@@ -51,6 +57,388 @@ App.Pages.Booking = (function () {
      * @type {Boolean}
      */
     let manageMode = vars('manage_mode') || false;
+
+    /**
+     * Determine whether a service is a fixed combo.
+     *
+     * @param {Object} service Service record.
+     *
+     * @return {Boolean}
+     */
+    function isComboService(service) {
+        return Boolean(service && COMBO_CATEGORY_PATTERN.test(service.service_category_name || ''));
+    }
+
+    /**
+     * Get all selected service IDs, including the primary service and add-ons.
+     *
+     * @return {Number[]}
+     */
+    function getSelectedServiceIds() {
+        const serviceIds = [$selectService.val(), ...$bookingAddons.find(':checked').map((index, element) => element.value).get()]
+            .filter(Boolean)
+            .map(Number);
+
+        return [...new Set(serviceIds)];
+    }
+
+    /**
+     * Calculate the selected services' combined price.
+     *
+     * @return {Number}
+     */
+    function calculateTotalPrice() {
+        const selectedIds = getSelectedServiceIds();
+
+        return vars('available_services')
+            .filter((service) => selectedIds.includes(Number(service.id)))
+            .reduce((total, service) => total + Number(service.price || 0), 0);
+    }
+
+    /**
+     * Calculate the selected services' combined duration.
+     *
+     * @return {Number}
+     */
+    function calculateTotalDuration() {
+        const selectedIds = getSelectedServiceIds();
+
+        return vars('available_services')
+            .filter((service) => selectedIds.includes(Number(service.id)))
+            .reduce((total, service) => total + Number(service.duration || 0), 0);
+    }
+
+    /**
+     * Filter the main service options to match the selected booking mode.
+     */
+    function applyBookingPackageMode() {
+        const mode = $bookingPackageMode.val();
+        const previousServiceId = $selectService.val();
+
+        $selectService.find('option').each((index, option) => {
+            if (!option.value) {
+                $(option).prop('hidden', false);
+                return;
+            }
+
+            const service = vars('available_services').find(
+                (availableService) => Number(availableService.id) === Number(option.value),
+            );
+
+            $(option).prop('hidden', mode === 'combo' ? !isComboService(service) : isComboService(service));
+        });
+
+        if ($selectService.find(`option[value="${previousServiceId}"]:not([hidden])`).length) {
+            $selectService.val(previousServiceId);
+        } else {
+            $selectService.val('');
+        }
+
+        renderBookingAddons();
+    }
+
+    /**
+     * Render add-on checkboxes from the available standalone services.
+     */
+    function renderBookingAddons() {
+        const primaryServiceId = Number($selectService.val());
+        const selectedAddonIds = $bookingAddons.find(':checked').map((index, element) => Number(element.value)).get();
+        const addons = vars('available_services').filter(
+            (service) => !isComboService(service) && Number(service.id) !== primaryServiceId,
+        );
+
+        $bookingAddons.empty();
+        $('#booking-addons-section').prop('hidden', !$selectService.val() || !addons.length);
+
+        addons.forEach((service) => {
+            const checked = selectedAddonIds.includes(Number(service.id));
+            const $input = $('<input/>', {
+                type: 'checkbox',
+                class: 'form-check-input booking-addon',
+                id: `booking-addon-${service.id}`,
+                value: service.id,
+                checked,
+            });
+            const $label = $('<label/>', {
+                class: 'form-check-label d-flex justify-content-between gap-3',
+                for: `booking-addon-${service.id}`,
+            });
+
+            $('<span/>', {text: service.name}).appendTo($label);
+            $('<span/>', {
+                class: 'text-nowrap text-muted',
+                text: `${Number(service.duration)} phút · ${Number(service.price).toLocaleString('vi-VN')} ₫`,
+            }).appendTo($label);
+
+            $('<div/>', {class: 'form-check booking-addon-option'})
+                .append($input, $label)
+                .appendTo($bookingAddons);
+        });
+    }
+
+    /**
+     * Update the live package total.
+     */
+    function updateBookingPackageSummary() {
+        const serviceIds = getSelectedServiceIds();
+        const services = vars('available_services').filter((service) => serviceIds.includes(Number(service.id)));
+        const $summary = $('#booking-package-summary');
+
+        $summary.prop('hidden', !services.length);
+        $('#booking-package-summary-items').text(services.map((service) => service.name).join(' + '));
+        $('#booking-package-total-duration').text(`${calculateTotalDuration()} phút`);
+        $('#booking-package-total-price').text(`${calculateTotalPrice().toLocaleString('vi-VN')} ₫`);
+    }
+
+    /**
+     * Whether the customer is configuring multiple seats.
+     *
+     * @return {Boolean}
+     */
+    function isGroupBooking() {
+        return $bookingAttendanceMode.val() === 'group';
+    }
+
+    /**
+     * List the selected services for one group guest.
+     *
+     * @param {jQuery} $guest Guest configuration card.
+     *
+     * @return {Number[]}
+     */
+    function getGroupGuestServiceIds($guest) {
+        const primaryId = Number($guest.find('.booking-group-primary-service').val());
+        const addonIds = $guest
+            .find('.booking-group-addon:checked')
+            .map((index, element) => Number(element.value))
+            .get();
+
+        return [...new Set([primaryId, ...addonIds].filter(Boolean))];
+    }
+
+    /**
+     * Build the per-guest service and barber configuration forms.
+     */
+    function renderGroupGuests() {
+        const guestCount = Number($bookingGroupSize.val()) || 2;
+        const services = vars('available_services');
+        const addons = services.filter((service) => !isComboService(service));
+        $bookingGroupGuests.empty();
+
+        for (let index = 0; index < guestCount; index++) {
+            const $card = $('<div/>', {class: 'booking-group-guest border rounded p-3 mb-3', 'data-guest-index': index});
+            const $heading = $('<h3/>', {class: 'fs-5', text: `Khách ${index + 1}`});
+            const $name = $('<input/>', {
+                class: 'form-control mb-3 booking-group-guest-name',
+                maxlength: 256,
+                value: `Khách ${index + 1}`,
+                'aria-label': `Tên khách ${index + 1}`,
+            });
+            const $serviceSelect = $('<select/>', {class: 'form-select mb-3 booking-group-primary-service'});
+            $serviceSelect.append(new Option('Chọn dịch vụ chính', ''));
+            services.forEach((service) => $serviceSelect.append(new Option(service.name, service.id)));
+
+            const $addonList = $('<div/>', {class: 'booking-group-guest-services mb-3'});
+            addons.forEach((service) => {
+                const id = `booking-group-${index}-addon-${service.id}`;
+                const $checkbox = $('<input/>', {
+                    class: 'form-check-input booking-group-addon me-2',
+                    id,
+                    type: 'checkbox',
+                    value: service.id,
+                });
+                const $label = $('<label/>', {
+                    class: 'form-check-label d-flex justify-content-between gap-2 w-100',
+                    for: id,
+                }).append(
+                    $('<span/>', {text: service.name}),
+                    $('<span/>', {
+                        class: 'text-nowrap text-muted',
+                        text: `${Number(service.duration)} phút · ${Number(service.price).toLocaleString('vi-VN')} ₫`,
+                    }),
+                );
+                $addonList.append($('<div/>', {class: 'form-check booking-addon-option'}).append($checkbox, $label));
+            });
+
+            const $provider = $('<select/>', {class: 'form-select booking-group-provider'});
+            $provider.append(new Option('Thợ bất kỳ', 'any-provider'));
+            vars('available_providers').forEach((provider) => {
+                $provider.append(new Option(`${provider.first_name} ${provider.last_name}`.trim(), provider.id));
+            });
+
+            $card.append(
+                $heading,
+                $('<label/>', {class: 'form-label', text: 'Tên khách (không bắt buộc)'}),
+                $name,
+                $('<label/>', {class: 'form-label', text: 'Dịch vụ chính'}),
+                $serviceSelect,
+                $('<div/>', {class: 'small text-muted mb-2', text: 'Dịch vụ bổ sung'}),
+                $addonList,
+                $('<label/>', {class: 'form-label', text: 'Thợ phụ trách'}),
+                $provider,
+            );
+            $bookingGroupGuests.append($card);
+            updateGroupGuestOptions($card);
+        }
+
+        updateGroupBookingSummary();
+    }
+
+    /**
+     * Keep each guest's barber choices limited to providers covering all selected services.
+     *
+     * @param {jQuery} $guest Guest configuration card.
+     */
+    function updateGroupGuestOptions($guest) {
+        const serviceIds = getGroupGuestServiceIds($guest);
+        const $provider = $guest.find('.booking-group-provider');
+        const selectedProvider = $provider.val();
+
+        $provider.empty().append(new Option('Thợ bất kỳ', 'any-provider'));
+
+        vars('available_providers')
+            .filter((provider) =>
+                serviceIds.every((serviceId) => provider.services.map(Number).includes(Number(serviceId))),
+            )
+            .forEach((provider) => {
+                $provider.append(new Option(`${provider.first_name} ${provider.last_name}`.trim(), provider.id));
+            });
+
+        $provider.val($provider.find(`option[value="${selectedProvider}"]`).length ? selectedProvider : 'any-provider');
+    }
+
+    /**
+     * Update the visible estimate for all group seats.
+     */
+    function updateGroupBookingSummary() {
+        let totalPrice = 0;
+        let totalDuration = 0;
+        const summary = [];
+
+        $bookingGroupGuests.children('.booking-group-guest').each((index, guestElement) => {
+            const $guest = $(guestElement);
+            const selectedIds = getGroupGuestServiceIds($guest);
+            const services = vars('available_services').filter((service) => selectedIds.includes(Number(service.id)));
+            const price = services.reduce((total, service) => total + Number(service.price || 0), 0);
+            const duration = services.reduce((total, service) => total + Number(service.duration || 0), 0);
+            totalPrice += price;
+            totalDuration += duration;
+            summary.push(
+                `<div class="d-flex justify-content-between"><span>Khách ${index + 1}: ${services
+                    .map((service) => App.Utils.String.escapeHtml(service.name))
+                    .join(' + ') || 'Chưa chọn dịch vụ'}</span><span>${duration} phút · ${price.toLocaleString('vi-VN')} ₫</span></div>`,
+            );
+        });
+
+        $('#booking-group-summary').html(
+            `${summary.join('')}<hr><div class="d-flex justify-content-between"><strong>Tổng thời lượng</strong><strong>${totalDuration} phút</strong></div><div class="d-flex justify-content-between"><strong>Tổng tiền</strong><strong>${totalPrice.toLocaleString('vi-VN')} ₫</strong></div>`,
+        );
+    }
+
+    /**
+     * Serialize the services and barber preference selected for each guest.
+     *
+     * @return {Object[]}
+     */
+    function getGroupGuestSelections() {
+        return $bookingGroupGuests.children('.booking-group-guest').map((index, element) => {
+            const $guest = $(element);
+
+            return {
+                guest_index: index + 1,
+                guest_name: $guest.find('.booking-group-guest-name').val(),
+                primary_service_id: Number($guest.find('.booking-group-primary-service').val()),
+                service_ids: getGroupGuestServiceIds($guest),
+                provider_id: $guest.find('.booking-group-provider').val(),
+            };
+        }).get();
+    }
+
+    /**
+     * Whether each configured seat has a primary service selected.
+     *
+     * @return {Boolean}
+     */
+    function hasCompleteGroupServices() {
+        return $bookingGroupGuests.children('.booking-group-guest').length >= 2 &&
+            $bookingGroupGuests.find('.booking-group-primary-service').toArray().every((element) => Boolean($(element).val()));
+    }
+
+    /**
+     * Build the server payload for the chosen group slot.
+     *
+     * @return {Object}
+     */
+    function buildGroupBookingPayload() {
+        const selectedDate = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+        return {
+            booking_date: moment(selectedDate).format('YYYY-MM-DD'),
+            start_time: $('.selected-hour').data('value'),
+            timezone: $selectTimezone.val(),
+            notes: $notes.val(),
+            guests: getGroupGuestSelections(),
+        };
+    }
+
+    /**
+     * Return barbers who can perform every selected service.
+     *
+     * @param {Number[]} serviceIds Selected service IDs.
+     *
+     * @return {Object[]}
+     */
+    function filterAvailableBarbers(serviceIds = getSelectedServiceIds()) {
+        return vars('available_providers').filter((provider) =>
+            serviceIds.every((serviceId) => provider.services.map(Number).includes(Number(serviceId))),
+        );
+    }
+
+    /**
+     * Rebuild the provider list so every selected service is covered.
+     *
+     * @param {String|null} previousProviderId Provider to keep if still qualified.
+     */
+    function updateProviderOptions(previousProviderId = $selectProvider.val()) {
+        const serviceIds = getSelectedServiceIds();
+
+        $selectProvider.parent().prop('hidden', !serviceIds.length);
+        $selectProvider.empty().append(new Option(lang('please_select'), ''));
+
+        const qualifiedProviders = filterAvailableBarbers(serviceIds);
+
+        qualifiedProviders.forEach((provider) => {
+            $selectProvider.append(new Option(provider.first_name + ' ' + provider.last_name, provider.id));
+        });
+
+        if (serviceIds.length && !qualifiedProviders.length) {
+            $selectProvider.find('option[value=""]').text('Không có thợ phù hợp với dịch vụ đã chọn');
+        }
+
+        const previousProviderCanServe = qualifiedProviders.some(
+            (provider) => String(provider.id) === String(previousProviderId),
+        );
+
+        if (qualifiedProviders.length === 1) {
+            $selectProvider.find('option[value=""]').remove();
+        }
+
+        if (qualifiedProviders.length > 1 && Boolean(Number(vars('display_any_provider')))) {
+            $(new Option(lang('any_provider'), 'any-provider')).insertAfter($selectProvider.find('option:first'));
+        }
+
+        if (previousProviderCanServe) {
+            $selectProvider.val(previousProviderId);
+        } else if (
+            previousProviderId === 'any-provider' &&
+            qualifiedProviders.length > 1 &&
+            Boolean(Number(vars('display_any_provider')))
+        ) {
+            $selectProvider.val('any-provider');
+        }
+
+        $selectProvider.trigger('change');
+    }
 
     /**
      * Detect the month step.
@@ -123,6 +511,11 @@ App.Pages.Booking = (function () {
                 }
 
                 monthTimeout = setTimeout(() => {
+                    if (isGroupBooking() && !manageMode) {
+                        $selectDate.parent().fadeTo(400, 1);
+                        return;
+                    }
+
                     const previousMoment = moment(instance.selectedDates[0]);
 
                     const displayedMonthMoment = moment(
@@ -145,6 +538,11 @@ App.Pages.Booking = (function () {
 
             onYearChange: (selectedDates, dateStr, instance) => {
                 setTimeout(() => {
+                    if (isGroupBooking() && !manageMode) {
+                        $selectDate.parent().fadeTo(400, 1);
+                        return;
+                    }
+
                     const previousMoment = moment(instance.selectedDates[0]);
 
                     const displayedMonthMoment = moment(
@@ -171,17 +569,35 @@ App.Pages.Booking = (function () {
         const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         const isTimezoneSupported = $selectTimezone.find(`option[value="${browserTimezone}"]`).length > 0;
         $selectTimezone.val(isTimezoneSupported ? browserTimezone : 'UTC');
+        $bookingAttendanceMode.find('option[value="group"]').prop('disabled', Boolean(manageMode));
+        if (manageMode) {
+            $bookingAttendanceMode.closest('.mb-4').prop('hidden', true);
+        }
 
         // Bind the event handlers (might not be necessary every time we use this class).
         addEventListeners();
 
         optimizeContactInfoDisplay();
 
-        const serviceOptionCount = $selectService.find('option').length;
+        const selectedServiceId = App.Utils.Url.queryParam('service');
+        const selectedService = vars('available_services').find(
+            (service) => Number(service.id) === Number(selectedServiceId),
+        );
+
+        if (selectedService && !isComboService(selectedService)) {
+            $bookingPackageMode.val('individual');
+        } else if (!vars('available_services').some(isComboService)) {
+            $bookingPackageMode.val('individual');
+            $bookingPackageMode.find('option[value="combo"]').prop('disabled', true);
+        }
+
+        applyBookingPackageMode();
+
+        const serviceOptionCount = $selectService.find('option:not([hidden])').length;
 
         if (serviceOptionCount === 2) {
             $selectService.find('option[value=""]').remove();
-            const firstServiceId = $selectService.find('option:first').attr('value');
+            const firstServiceId = $selectService.find('option:not([hidden]):first').attr('value');
             $selectService.val(firstServiceId).trigger('change');
         }
 
@@ -197,9 +613,7 @@ App.Pages.Booking = (function () {
                 .fadeIn();
         } else {
             // Check if a specific service was selected (via URL parameter).
-            const selectedServiceId = App.Utils.Url.queryParam('service');
-
-            if (selectedServiceId && $selectService.find('option[value="' + selectedServiceId + '"]').length > 0) {
+            if (selectedServiceId && $selectService.find(`option[value="${selectedServiceId}"]:not([hidden])`).length > 0) {
                 $selectService.val(selectedServiceId);
             }
 
@@ -334,6 +748,63 @@ App.Pages.Booking = (function () {
      * Add the page event listeners.
      */
     function addEventListeners() {
+        $bookingAttendanceMode.on('change', () => {
+            const groupMode = isGroupBooking() && !manageMode;
+
+            $('#booking-single-config').prop('hidden', groupMode);
+            $('#booking-group-config').prop('hidden', !groupMode);
+
+            if (groupMode) {
+                renderGroupGuests();
+                App.Http.Booking.clearUnavailableDates();
+                $availableHours.empty();
+            } else {
+                $selectService.trigger('change');
+            }
+
+            const date = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+            if (date && groupMode) {
+                App.Http.Booking.getAvailableHours(moment(date).format('YYYY-MM-DD'));
+            } else if (date && $selectService.val() && $selectProvider.val()) {
+                App.Http.Booking.getUnavailableDates(
+                    $selectProvider.val(),
+                    $selectService.val(),
+                    moment(date).format('YYYY-MM-DD'),
+                );
+            }
+
+            App.Pages.Booking.updateConfirmFrame();
+        });
+
+        $bookingGroupSize.on('change', () => {
+            renderGroupGuests();
+            $availableHours.empty();
+            App.Pages.Booking.updateConfirmFrame();
+        });
+
+        $bookingGroupGuests.on('change', '.booking-group-primary-service, .booking-group-addon', (event) => {
+            const $guest = $(event.target).closest('.booking-group-guest');
+            updateGroupGuestOptions($guest);
+            updateGroupBookingSummary();
+            App.Pages.Booking.updateConfirmFrame();
+
+            const date = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+            if (date) {
+                App.Http.Booking.getAvailableHours(moment(date).format('YYYY-MM-DD'));
+            }
+        });
+
+        $bookingGroupGuests.on('change', '.booking-group-provider', () => {
+            App.Pages.Booking.updateConfirmFrame();
+            const date = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+            if (date) {
+                App.Http.Booking.getAvailableHours(moment(date).format('YYYY-MM-DD'));
+            }
+        });
+
         /**
          * Event: Timezone "Changed"
          */
@@ -358,6 +829,38 @@ App.Pages.Booking = (function () {
             clearServiceAndProviderPrompt();
 
             App.Pages.Booking.updateConfirmFrame();
+
+            const date = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+            if (date && $selectService.val()) {
+                App.Http.Booking.getAvailableHours(moment(date).format('YYYY-MM-DD'));
+            }
+        });
+
+        $bookingPackageMode.on('change', () => {
+            applyBookingPackageMode();
+            $selectService.trigger('change');
+        });
+
+        $bookingAddons.on('change', '.booking-addon', () => {
+            const previousProviderId = $selectProvider.val();
+
+            updateBookingPackageSummary();
+            updateProviderOptions(previousProviderId);
+            App.Pages.Booking.updateConfirmFrame();
+
+            const date = App.Utils.UI.getDateTimePickerValue($selectDate);
+
+            if (date && $selectProvider.val()) {
+                const selectedDate = moment(date).format('YYYY-MM-DD');
+
+                App.Http.Booking.getUnavailableDates(
+                    $selectProvider.val(),
+                    $selectService.val(),
+                    selectedDate,
+                );
+                App.Http.Booking.getAvailableHours(selectedDate);
+            }
         });
 
         /**
@@ -369,58 +872,12 @@ App.Pages.Booking = (function () {
         $selectService.on('change', (event) => {
             clearServiceAndProviderPrompt();
 
-            const $target = $(event.target);
             const serviceId = $selectService.val();
             const previousProviderId = $selectProvider.val();
 
-            $selectProvider.parent().prop('hidden', !Boolean(serviceId));
-
-            $selectProvider.empty();
-
-            $selectProvider.append(new Option(lang('please_select'), ''));
-
-            let previousProviderCanServe = false;
-
-            vars('available_providers').forEach((provider) => {
-                // If the current provider is able to provide the selected service, add him to the list box.
-                const canServeService =
-                    provider.services.filter((providerServiceId) => Number(providerServiceId) === Number(serviceId))
-                        .length > 0;
-
-                if (canServeService) {
-                    $selectProvider.append(new Option(provider.first_name + ' ' + provider.last_name, provider.id));
-
-                    if (String(provider.id) === String(previousProviderId)) {
-                        previousProviderCanServe = true;
-                    }
-                }
-            });
-
-            const providerOptionCount = $selectProvider.find('option').length;
-
-            // Remove the "Please Select" option, if there is only one provider available
-
-            if (providerOptionCount === 2) {
-                $selectProvider.find('option[value=""]').remove();
-            }
-
-            // Add the "Any Provider" entry
-
-            if (providerOptionCount > 2 && Boolean(Number(vars('display_any_provider')))) {
-                $(new Option(lang('any_provider'), 'any-provider')).insertAfter($selectProvider.find('option:first'));
-            }
-
-            // Restore previous provider selection if they can serve the new service
-            if (previousProviderId && previousProviderCanServe) {
-                $selectProvider.val(previousProviderId);
-            } else if (
-                previousProviderId === 'any-provider' &&
-                providerOptionCount > 2 &&
-                Boolean(Number(vars('display_any_provider')))
-            ) {
-                $selectProvider.val('any-provider');
-            }
-
+            renderBookingAddons();
+            updateBookingPackageSummary();
+            updateProviderOptions(previousProviderId);
             App.Pages.Booking.updateConfirmFrame();
 
             App.Pages.Booking.updateServiceDescription(serviceId);
@@ -436,22 +893,45 @@ App.Pages.Booking = (function () {
             const $target = $(event.currentTarget);
 
             // If we are on the first step and there is no provider selected do not continue with the next step.
-            if ($target.attr('data-step_index') === '1' && !$selectProvider.val()) {
-                if (!$selectService.val()) {
-                    $selectService.addClass('is-invalid');
-                } else {
-                    $selectProvider.addClass('is-invalid');
-                }
+            if ($target.attr('data-step_index') === '1') {
+                if (isGroupBooking() && !manageMode) {
+                    let missingService = false;
+                    $bookingGroupGuests.find('.booking-group-primary-service').each((index, element) => {
+                        if (!$(element).val()) {
+                            $(element).addClass('is-invalid');
+                            missingService = true;
+                        } else {
+                            $(element).removeClass('is-invalid');
+                        }
+                    });
 
-                if (!$('#select-service-prompt').length) {
-                    $('<div/>', {
-                        'id': 'select-service-prompt',
-                        'class': 'text-danger mb-4',
-                        'text': lang('service_and_provider_missing'),
-                    }).appendTo('#wizard-frame-1 .frame-content .col');
-                }
+                    if (missingService) {
+                        if (!$('#select-service-prompt').length) {
+                            $('<div/>', {
+                                id: 'select-service-prompt',
+                                class: 'text-danger mb-4',
+                                text: 'Vui lòng chọn dịch vụ chính cho từng khách.',
+                            }).appendTo('#wizard-frame-1 .frame-content .col');
+                        }
+                        return;
+                    }
+                } else if (!$selectProvider.val()) {
+                    if (!$selectService.val()) {
+                        $selectService.addClass('is-invalid');
+                    } else {
+                        $selectProvider.addClass('is-invalid');
+                    }
 
-                return;
+                    if (!$('#select-service-prompt').length) {
+                        $('<div/>', {
+                            'id': 'select-service-prompt',
+                            'class': 'text-danger mb-4',
+                            'text': lang('service_and_provider_missing'),
+                        }).appendTo('#wizard-frame-1 .frame-content .col');
+                    }
+
+                    return;
+                }
             }
 
             // If we are on the first step, fetch unavailable dates and available hours for step 2.
@@ -463,15 +943,19 @@ App.Pages.Booking = (function () {
 
                 App.Utils.UI.setDateTimePickerValue($selectDate, selectedMoment.toDate());
 
-                App.Http.Booking.getUnavailableDates(
-                    $selectProvider.val(),
-                    $selectService.val(),
-                    selectedMoment.format('YYYY-MM-DD'),
-                );
-
-                if (appointmentDate) {
-                    // The unavailable dates request will not refresh the hours while in manage mode.
+                if (isGroupBooking() && !manageMode) {
                     App.Http.Booking.getAvailableHours(selectedMoment.format('YYYY-MM-DD'));
+                } else {
+                    App.Http.Booking.getUnavailableDates(
+                        $selectProvider.val(),
+                        $selectService.val(),
+                        selectedMoment.format('YYYY-MM-DD'),
+                    );
+
+                    if (appointmentDate) {
+                        // The unavailable dates request will not refresh the hours while in manage mode.
+                        App.Http.Booking.getAvailableHours(selectedMoment.format('YYYY-MM-DD'));
+                    }
                 }
             }
 
@@ -727,16 +1211,21 @@ App.Pages.Booking = (function () {
      * customer settings and input for the appointment booking.
      */
     function updateConfirmFrame() {
+        const groupMode = isGroupBooking() && !manageMode;
         const serviceId = $selectService.val();
         const providerId = $selectProvider.val();
 
-        $displayBookingSelection.text(`${lang('service')} │ ${lang('provider')}`); // Notice: "│" is a custom ASCII char
+        if (groupMode) {
+            $displayBookingSelection.text(`Đặt nhóm · ${$bookingGroupGuests.children('.booking-group-guest').length} khách`);
+        } else {
+            $displayBookingSelection.text(`${lang('service')} │ ${lang('provider')}`); // Notice: "│" is a custom ASCII char
 
-        const serviceOptionText = serviceId ? $selectService.find('option:selected').text() : lang('service');
-        const providerOptionText = providerId ? $selectProvider.find('option:selected').text() : lang('provider');
+            const serviceOptionText = serviceId ? $selectService.find('option:selected').text() : lang('service');
+            const providerOptionText = providerId ? $selectProvider.find('option:selected').text() : lang('provider');
 
-        if (serviceId || providerId) {
-            $displayBookingSelection.text(`${serviceOptionText} │ ${providerOptionText}`);
+            if (serviceId || providerId) {
+                $displayBookingSelection.text(`${serviceOptionText} │ ${providerOptionText}`);
+            }
         }
 
         if (!$availableHours.find('.selected-hour').text()) {
@@ -744,14 +1233,6 @@ App.Pages.Booking = (function () {
         }
 
         // Render the appointment details
-
-        const service = vars('available_services').find(
-            (availableService) => Number(availableService.id) === Number(serviceId),
-        );
-
-        if (!service) {
-            return; // Service was not found
-        }
 
         const selectedDateObject = App.Utils.UI.getDateTimePickerValue($selectDate);
         const selectedDateMoment = moment(selectedDateObject);
@@ -768,33 +1249,72 @@ App.Pages.Booking = (function () {
         }
 
         const timezoneOptionText = $selectTimezone.find('option:selected').text();
+        if (groupMode) {
+            let groupPrice = 0;
+            let groupDuration = 0;
+            const guestDetails = $bookingGroupGuests.children('.booking-group-guest').map((index, element) => {
+                const $guest = $(element);
+                const ids = getGroupGuestServiceIds($guest);
+                const services = vars('available_services').filter((item) => ids.includes(Number(item.id)));
+                const duration = services.reduce((total, item) => total + Number(item.duration || 0), 0);
+                const price = services.reduce((total, item) => total + Number(item.price || 0), 0);
+                const providerName = $guest.find('.booking-group-provider option:selected').text();
 
-        $('#appointment-details').html(`
-            <div>
-                <div class="mb-2 fw-bold fs-3">
-                    ${App.Utils.String.escapeHtml(serviceOptionText)}
-                </div> 
-                <div class="mb-2 fw-bold text-muted">
-                    ${App.Utils.String.escapeHtml(providerOptionText)}
+                groupPrice += price;
+                groupDuration += duration;
+
+                return `<div class="mb-3"><strong>Khách ${index + 1} · ${App.Utils.String.escapeHtml(
+                    $guest.find('.booking-group-guest-name').val(),
+                )}</strong><div>${services.map((item) => App.Utils.String.escapeHtml(item.name)).join(' + ')}</div><div class="text-muted">${App.Utils.String.escapeHtml(
+                    providerName,
+                )} · ${duration} ${lang('minutes')} · ${price.toLocaleString('vi-VN')} VNĐ</div></div>`;
+            }).get().join('');
+
+            $('#appointment-details').html(`
+                <div>
+                    <div class="mb-2 fw-bold fs-3">Đặt lịch nhóm</div>
+                    ${guestDetails}
+                    <div class="mb-2"><i class="fas fa-calendar-day me-2"></i>${formattedSelectedDate}</div>
+                    <div class="mb-2"><i class="fas fa-clock me-2"></i>${groupDuration} ${lang('minutes')} (mỗi khách có thời lượng riêng)</div>
+                    <div class="mb-2"><i class="fas fa-globe me-2"></i>${App.Utils.String.escapeHtml(timezoneOptionText)}</div>
+                    <div class="mb-2"><i class="fas fa-cash-register me-2"></i>${groupPrice.toLocaleString('vi-VN')} VNĐ</div>
                 </div>
-                <div class="mb-2">
-                    <i class="fas fa-calendar-day me-2"></i>
-                    ${formattedSelectedDate}
-                </div> 
-                <div class="mb-2">
-                    <i class="fas fa-clock me-2"></i>
-                    ${service.duration} ${lang('minutes')}
+            `);
+        } else {
+            const service = vars('available_services').find(
+                (availableService) => Number(availableService.id) === Number(serviceId),
+            );
+            const selectedServices = vars('available_services').filter((availableService) =>
+                getSelectedServiceIds().includes(Number(availableService.id)),
+            );
+
+            if (!service) {
+                return;
+            }
+
+            const totalDuration = calculateTotalDuration();
+            const totalPrice = calculateTotalPrice();
+            const serviceNames = selectedServices
+                .map((selectedService) => App.Utils.String.escapeHtml(selectedService.name))
+                .join(' + ');
+
+            $('#appointment-details').html(`
+                <div>
+                    <div class="mb-2 fw-bold fs-3">${serviceNames || App.Utils.String.escapeHtml(
+                        $selectService.find('option:selected').text(),
+                    )}</div>
+                    <div class="mb-2 fw-bold text-muted">${App.Utils.String.escapeHtml(
+                        $selectProvider.find('option:selected').text(),
+                    )}</div>
+                    <div class="mb-2"><i class="fas fa-calendar-day me-2"></i>${formattedSelectedDate}</div>
+                    <div class="mb-2"><i class="fas fa-clock me-2"></i>${totalDuration} ${lang('minutes')}</div>
+                    <div class="mb-2"><i class="fas fa-globe me-2"></i>${App.Utils.String.escapeHtml(timezoneOptionText)}</div>
+                    <div class="mb-2" ${!totalPrice ? 'hidden' : ''}><i class="fas fa-cash-register me-2"></i>${totalPrice.toLocaleString(
+                        'vi-VN',
+                    )} ${App.Utils.String.escapeHtml(service.currency || 'VNĐ')}</div>
                 </div>
-                <div class="mb-2">
-                    <i class="fas fa-globe me-2"></i>
-                    ${App.Utils.String.escapeHtml(timezoneOptionText)}
-                </div> 
-                <div class="mb-2" ${!Number(service.price) ? 'hidden' : ''}>
-                    <i class="fas fa-cash-register me-2"></i>
-                    ${Number(service.price).toFixed(2)} ${App.Utils.String.escapeHtml(service.currency)}
-                </div>
-            </div>     
-        `);
+            `);
+        }
 
         // Render the customer information
 
@@ -860,18 +1380,24 @@ App.Pages.Booking = (function () {
             custom_field_5: $customField5.val(),
         };
 
-        data.appointment = {
-            start_datetime:
-                moment(App.Utils.UI.getDateTimePickerValue($selectDate)).format('YYYY-MM-DD') +
-                ' ' +
-                moment($('.selected-hour').data('value'), 'HH:mm').format('HH:mm') +
-                ':00',
-            end_datetime: calculateEndDatetime(),
-            notes: $notes.val(),
-            is_unavailability: false,
-            id_users_provider: $selectProvider.val(),
-            id_services: $selectService.val(),
-        };
+        if (groupMode) {
+            data.group_booking = buildGroupBookingPayload();
+            data.manage_mode = 0;
+        } else {
+            data.appointment = {
+                start_datetime:
+                    moment(App.Utils.UI.getDateTimePickerValue($selectDate)).format('YYYY-MM-DD') +
+                    ' ' +
+                    moment($('.selected-hour').data('value'), 'HH:mm').format('HH:mm') +
+                    ':00',
+                end_datetime: calculateEndDatetime(),
+                notes: $notes.val(),
+                is_unavailability: false,
+                id_users_provider: $selectProvider.val(),
+                id_services: $selectService.val(),
+                selected_service_ids: getSelectedServiceIds(),
+            };
+        }
 
         data.manage_mode = Number(manageMode);
 
@@ -892,13 +1418,6 @@ App.Pages.Booking = (function () {
      * @return {String} Returns the end datetime in string format.
      */
     function calculateEndDatetime() {
-        // Find selected service duration.
-        const serviceId = $selectService.val();
-
-        const service = vars('available_services').find(
-            (availableService) => Number(availableService.id) === Number(serviceId),
-        );
-
         // Add the duration to the start datetime.
         const selectedDate = moment(App.Utils.UI.getDateTimePickerValue($selectDate)).format('YYYY-MM-DD');
 
@@ -908,8 +1427,10 @@ App.Pages.Booking = (function () {
 
         let endMoment;
 
-        if (service.duration && startMoment) {
-            endMoment = startMoment.clone().add({'minutes': parseInt(service.duration)});
+        const totalDuration = calculateTotalDuration();
+
+        if (totalDuration && startMoment) {
+            endMoment = startMoment.clone().add({'minutes': totalDuration});
         } else {
             endMoment = moment();
         }
@@ -929,8 +1450,21 @@ App.Pages.Booking = (function () {
      */
     function applyAppointmentData(appointment, provider, customer) {
         try {
-            // Select Service & Provider
+            // Select the primary service and any saved add-ons.
+            const primaryService = vars('available_services').find(
+                (service) => Number(service.id) === Number(appointment.id_services),
+            );
+            $bookingPackageMode.val(primaryService && isComboService(primaryService) ? 'combo' : 'individual');
+            applyBookingPackageMode();
             $selectService.val(appointment.id_services).trigger('change');
+
+            const selectedServiceIds = (appointment.selected_service_ids || [appointment.id_services]).map(Number);
+            $bookingAddons.find('.booking-addon').each((index, element) => {
+                $(element).prop('checked', selectedServiceIds.includes(Number(element.value)));
+            });
+            renderBookingAddons();
+            updateBookingPackageSummary();
+            updateProviderOptions(String(appointment.id_users_provider));
             $selectProvider.val(appointment.id_users_provider);
 
             // Set Appointment Date
@@ -1173,5 +1707,12 @@ App.Pages.Booking = (function () {
         updateConfirmFrame,
         updateServiceDescription,
         validateCustomerForm,
+        getSelectedServiceIds,
+        calculateTotalPrice,
+        calculateTotalDuration,
+        filterAvailableBarbers,
+        isGroupBooking,
+        getGroupGuestSelections,
+        hasCompleteGroupServices,
     };
 })();
