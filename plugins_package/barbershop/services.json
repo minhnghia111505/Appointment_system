@@ -1,0 +1,148 @@
+[
+    {
+        "category": "Cắt & Tạo kiểu",
+        "services": [
+            {
+                "name": "Cắt tóc nam tiêu chuẩn",
+                "duration": 30,
+                "price": 100000,
+                "color": "#c59b27"
+            },
+            {
+                "name": "Cắt tóc trẻ em (dưới 12 tuổi)",
+                "duration": 25,
+                "price": 80000,
+                "color": "#c59b27"
+            },
+            {
+                "name": "Cắt tỉa viền & Chân tóc",
+                "duration": 15,
+                "price": 50000,
+                "color": "#c59b27"
+            },
+            {
+                "name": "Kẻ line / Tạo hình hoa văn (Hair Tattoo)",
+                "duration": 20,
+                "price": 50000,
+                "color": "#c59b27"
+            }
+        ]
+    },
+    {
+        "category": "Hóa chất (Uốn/Nhuộm/Ép)",
+        "services": [
+            {
+                "name": "Uốn xoăn Hàn Quốc / Uốn sóng",
+                "duration": 60,
+                "price": 300000,
+                "color": "#e0a800"
+            },
+            {
+                "name": "Uốn Premlock / Afro",
+                "duration": 90,
+                "price": 500000,
+                "color": "#e0a800"
+            },
+            {
+                "name": "Uốn phồng chân tóc",
+                "duration": 45,
+                "price": 250000,
+                "color": "#e0a800"
+            },
+            {
+                "name": "Nhuộm phủ bạc / Màu tự nhiên",
+                "duration": 45,
+                "price": 200000,
+                "color": "#e0a800"
+            },
+            {
+                "name": "Tẩy tóc & Nhuộm màu thời trang",
+                "duration": 120,
+                "price": 500000,
+                "color": "#e0a800"
+            },
+            {
+                "name": "Ép Side (Side Down Perm)",
+                "duration": 40,
+                "price": 150000,
+                "color": "#e0a800"
+            }
+        ]
+    },
+    {
+        "category": "Chăm sóc Râu & Mặt",
+        "services": [
+            {
+                "name": "Cạo râu & Bấm tỉa dáng râu",
+                "duration": 20,
+                "price": 60000,
+                "color": "#17a2b8"
+            },
+            {
+                "name": "Cạo mặt & Tẩy tế bào chết",
+                "duration": 20,
+                "price": 50000,
+                "color": "#17a2b8"
+            },
+            {
+                "name": "Lột mụn cám & Đắp mặt nạ",
+                "duration": 20,
+                "price": 70000,
+                "color": "#17a2b8"
+            }
+        ]
+    },
+    {
+        "category": "Gội & Thư giãn",
+        "services": [
+            {
+                "name": "Gội xả & Massage đầu cơ bản",
+                "duration": 20,
+                "price": 50000,
+                "color": "#28a745"
+            },
+            {
+                "name": "Gội đầu dưỡng sinh nam",
+                "duration": 45,
+                "price": 150000,
+                "color": "#28a745"
+            },
+            {
+                "name": "Ráy tai thư giãn",
+                "duration": 30,
+                "price": 80000,
+                "color": "#28a745"
+            },
+            {
+                "name": "Phục hồi tóc xơ rối (Hấp Keratin)",
+                "duration": 45,
+                "price": 200000,
+                "color": "#28a745"
+            }
+        ]
+    },
+    {
+        "category": "Gói Combo Tiết Kiệm",
+        "services": [
+            {
+                "name": "Combo Basic (Cắt + Gội + Sấy sáp)",
+                "duration": 45,
+                "price": 130000,
+                "color": "#dc3545"
+            },
+            {
+                "name": "Combo Gentleman (Cắt + Gội + Cạo râu + Massage mặt)",
+                "duration": 60,
+                "price": 180000,
+                "color": "#dc3545"
+            },
+            {
+                "name": "Combo Fashion (Cắt + Gội + Uốn hoặc Nhuộm + Ép side)",
+                "duration": 120,
+                "price": 550000,
+                "color": "#dc3545"
+            }
+        ]
+    }
+]
+

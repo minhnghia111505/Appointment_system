@@ -1,0 +1,13 @@
+{
+    "id": "barbershop",
+    "name": "Barbershop Pro",
+    "version": "1.0.0",
+    "author": "Nhóm Đồ án Mã Nguồn Mở - HaUI",
+    "description": "Gói mở rộng chuyên biệt cho Tiệm làm tóc nam: tự động áp dụng nhận diện thương hiệu sang trọng (Tone màu Vàng Gold / Đen), đồng bộ bảng giá 20 dịch vụ chuẩn Barbershop và phân bổ ca làm việc cho thợ.",
+    "company_name": "HAUI Barbershop Classic",
+    "company_color": "#c59b27",
+    "theme": "default",
+    "icon": "fas fa-cut",
+    "category": "Dịch vụ làm tóc nam"
+}
+

@@ -84,6 +84,16 @@
                 </div>
             </li>
 
+            <?php if (can('view', PRIV_SYSTEM_SETTINGS)): ?>
+            <li class="nav-item text-center <?= $active_menu === 'plugins' ? 'active' : '' ?>" style="min-width: 100px;">
+                <a href="<?= site_url('plugins') ?>" class="nav-link text-white fw-light py-3 px-3"
+                   data-tippy-content="Quản lý Plugin">
+                    <i class="fas fa-puzzle-piece me-2"></i>
+                    Plugins
+                </a>
+            </li>
+            <?php endif; ?>
+
             <?php $hidden = can('view', PRIV_SYSTEM_SETTINGS) || can('view', PRIV_USER_SETTINGS) ? '' : 'd-none'; ?>
             <?php $active = $active_menu == PRIV_SYSTEM_SETTINGS ? 'active' : ''; ?>
             <li class="nav-item dropdown text-center <?= $active . $hidden ?>" style="min-width: 100px;">
@@ -94,6 +104,10 @@
                 </a>
                 <div class="dropdown-menu dropdown-menu-end">
                     <?php if (can('view', PRIV_SYSTEM_SETTINGS)): ?>
+                        <a class="dropdown-item" href="<?= site_url('plugins') ?>">
+                            <i class="fas fa-puzzle-piece me-2"></i>
+                            Quản lý Plugin
+                        </a>
                         <a class="dropdown-item" href="<?= site_url('general_settings') ?>">
                             <i class="fas fa-cogs me-2"></i>
                             <?= lang('settings') ?>
